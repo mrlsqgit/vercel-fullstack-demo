@@ -1,473 +1,366 @@
 // app/page.tsx
-// Main page component with navigation tabs
+// Main page: User list with CRUD operations and Excel import/export
 
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
-import { Upload, List, FileSpreadsheet } from 'lucide-react';
-import FileUploader from './components/FileUploader';
-import ProgressBar from './components/ProgressBar';
-import DataTable from './components/DataTable';
-import ErrorList from './components/ErrorList';
-import { ParsedRow, ValidationError } from '@/lib/db';
-import { validateRow, findDuplicates } from '@/utils/excelParser';
-
-type TabType = 'upload' | 'preview' | 'history';
+import { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
+import { User, ApiResponse } from '@/lib/types';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<TabType>('upload');
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploading, setUploading] = useState(false);
-  const [parsedRows, setParsedRows] = useState<ParsedRow[]>([]);
-  const [errors, setErrors] = useState<ValidationError[]>([]);
-  const [duplicates, setDuplicates] = useState<{ rowIndex: number; duplicateOf: number }[]>([]);
-  const [headers, setHeaders] = useState<string[]>([]);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [submitProgress, setSubmitProgress] = useState(0);
-  const [submitResult, setSubmitResult] = useState<{ success: number; failed: number } | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [deleteModal, setDeleteModal] = useState<{ show: boolean; user: User | null }>({ show: false, user: null });
+  const [importModal, setImportModal] = useState(false);
+  const [importResult, setImportResult] = useState<{ success: boolean; message: string; details?: string[] } | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileUpload = useCallback(async (file: File) => {
-    setUploading(true);
-    setUploadProgress(0);
-    
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    const interval = setInterval(() => {
-      setUploadProgress(prev => Math.min(prev + Math.random() * 15, 90));
-    }, 200);
-    
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  async function fetchUsers() {
     try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
+      setLoading(true);
+      const res = await fetch('/api/users');
+      const data: ApiResponse<User[]> = await res.json();
       
-      clearInterval(interval);
-      setUploadProgress(100);
-      
-      const result = await response.json();
-      
-      if (result.success) {
-        setParsedRows(result.data.rows);
-        setErrors(result.data.errors);
-        setDuplicates(result.data.duplicates);
-        setHeaders(result.data.headers);
-        setFileName(file.name);
-        setTimeout(() => {
-          setActiveTab('preview');
-          setUploadProgress(0);
-        }, 500);
+      if (data.success) {
+        setUsers(data.data || []);
       } else {
-        alert(result.error || '上传失败');
+        setError(data.error || 'Failed to fetch users');
       }
-    } catch (error) {
-      clearInterval(interval);
-      console.error('Upload error:', error);
-      alert('上传失败，请重试');
+    } catch (err: any) {
+      setError(err.message || 'Network error');
     } finally {
-      setUploading(false);
+      setLoading(false);
     }
-  }, []);
+  }
 
-  const handleRowUpdate = useCallback((index: number, field: string, value: string) => {
-    setParsedRows(prev => {
-      const newRows = [...prev];
-      newRows[index] = { ...newRows[index], [field]: value };
-      return newRows;
-    });
-    
-    // Re-validate after update
-    setTimeout(() => {
-      const updatedRows = [...parsedRows];
-      updatedRows[index] = { ...updatedRows[index], [field]: value };
-      const newErrors = updatedRows.flatMap((row, idx) => 
-        idx === index ? validateRow(row, idx) : []
-      );
-      const existingErrors = errors.filter(e => e.rowIndex !== index);
-      setErrors([...existingErrors, ...newErrors]);
-      setDuplicates(findDuplicates(updatedRows));
-    }, 0);
-  }, [parsedRows, errors]);
-
-  const handleRowDelete = useCallback((index: number) => {
-    setParsedRows(prev => prev.filter((_, i) => i !== index));
-    setErrors(prev => prev.filter(e => e.rowIndex !== index).map(e => ({
-      ...e,
-      rowIndex: e.rowIndex > index ? e.rowIndex - 1 : e.rowIndex,
-    })));
-  }, []);
-
-  const handleRowAdd = useCallback(() => {
-    const newRow: ParsedRow = {
-      sender_name: '',
-      sender_phone: '',
-      sender_address: '',
-      receiver_name: '',
-      receiver_phone: '',
-      receiver_address: '',
-      weight: '',
-      quantity: '',
-      temperature: '',
-    };
-    setParsedRows(prev => [...prev, newRow]);
-  }, []);
-
-  const handleSubmit = useCallback(async () => {
-    // Check for errors
-    const allErrors = parsedRows.flatMap((row, index) => validateRow(row, index));
-    if (allErrors.length > 0) {
-      setErrors(allErrors);
-      alert(`存在 ${allErrors.length} 个错误，请先修正`);
-      return;
-    }
-    
-    setSubmitProgress(0);
-    const interval = setInterval(() => {
-      setSubmitProgress(prev => Math.min(prev + Math.random() * 10, 90));
-    }, 300);
-    
+  async function handleDelete(user: User) {
     try {
-      const orders = parsedRows.map(row => ({
-        ...row,
-        weight: parseFloat(row.weight),
-        quantity: parseInt(row.quantity),
-      }));
+      const res = await fetch(`/api/users/${user.id}`, { method: 'DELETE' });
+      const data: ApiResponse = await res.json();
       
-      const response = await fetch('/api/orders', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ orders }),
-      });
-      
-      clearInterval(interval);
-      setSubmitProgress(100);
-      
-      const result = await response.json();
-      
-      if (result.success) {
-        setSubmitResult({
-          success: result.successCount,
-          failed: result.failedCount,
-        });
-        setTimeout(() => {
-          setActiveTab('history');
-          setSubmitProgress(0);
-          setSubmitResult(null);
-          setParsedRows([]);
-          setErrors([]);
-          setDuplicates([]);
-          setFileName(null);
-        }, 2000);
+      if (data.success) {
+        setUsers(users.filter(u => u.id !== user.id));
+        setDeleteModal({ show: false, user: null });
       } else {
-        alert(result.error || '提交失败');
+        alert(data.error || 'Failed to delete user');
       }
-    } catch (error) {
-      clearInterval(interval);
-      console.error('Submit error:', error);
-      alert('提交失败，请重试');
+    } catch (err: any) {
+      alert(err.message || 'Network error');
     }
-  }, [parsedRows]);
+  }
 
-  const handleExport = useCallback(() => {
-    const headers = ['发件人姓名', '发件人电话', '发件人地址', '收件人姓名', '收件人电话', '收件人地址', '重量', '件数', '温层', '备注'];
-    const rows = parsedRows.map(row => [
-      row.sender_name,
-      row.sender_phone,
-      row.sender_address,
-      row.receiver_name,
-      row.receiver_phone,
-      row.receiver_address,
-      row.weight,
-      row.quantity,
-      row.temperature,
-      row.remark || '',
-    ]);
-    
-    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+  async function handleExport() {
+    try {
+      const res = await fetch('/api/users');
+      const data: ApiResponse<User[]> = await res.json();
+      
+      if (data.success && data.data) {
+        const worksheetData = data.data.map((user) => ({
+          ID: user.id,
+          姓名: user.name,
+          邮箱: user.email,
+          电话: user.phone || '',
+          状态: user.status === 'active' ? '正常' : '禁用',
+          创建时间: new Date(user.created_at).toLocaleString('zh-CN'),
+          更新时间: new Date(user.updated_at).toLocaleString('zh-CN'),
+        }));
+
+        const csvContent = [
+          ['ID', '姓名', '邮箱', '电话', '状态', '创建时间', '更新时间'].join(','),
+          ...worksheetData.map(row => [
+            row.ID,
+            `"${row.姓名}"`,
+            `"${row.邮箱}"`,
+            `"${row.电话}"`,
+            `"${row.状态}"`,
+            `"${row.创建时间}"`,
+            `"${row.更新时间}"`,
+          ].join(','))
+        ].join('\n');
+
+        const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', `users_${Date.now()}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch (err: any) {
+      alert('导出失败: ' + err.message);
+    }
+  }
+
+  async function handleDownloadTemplate() {
+    const templateData = [
+      ['姓名', '邮箱', '电话', '状态'],
+      ['张三', 'zhangsan@example.com', '13800138001', '正常'],
+      ['李四', 'lisi@example.com', '13800138002', '正常'],
+      ['王五', 'wangwu@example.com', '', '禁用'],
+    ];
+
+    const csvContent = templateData.map(row => 
+      row.map(cell => `"${cell}"`).join(',')
+    ).join('\n');
+
+    const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', `export_${Date.now()}.csv`);
+    link.setAttribute('download', 'import_template.csv');
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  }, [parsedRows]);
+  }
 
-  const tabs = [
-    { id: 'upload' as TabType, label: '上传文件', icon: Upload },
-    { id: 'preview' as TabType, label: '预览编辑', icon: FileSpreadsheet },
-    { id: 'history' as TabType, label: '历史记录', icon: List },
-  ];
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg flex items-center justify-center">
-              <FileSpreadsheet className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-gray-900">万能导入系统</h1>
-              <p className="text-sm text-gray-500">多模板自动识别 · 批量下单</p>
-            </div>
-          </div>
-        </div>
-      </header>
+    setImportLoading(true);
+    setImportResult(null);
 
-      {/* Tabs */}
-      <div className="sticky top-0 bg-white border-b border-gray-200 z-10">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="flex gap-1">
-            {tabs.map(tab => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
-                    activeTab === tab.id
-                      ? 'text-primary-600 border-b-2 border-primary-600'
-                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                  }`}
-                >
-                  <Icon className="w-4 h-4" />
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
+    const formData = new FormData();
+    formData.append('file', file);
 
-      {/* Content */}
-      <main className="max-w-7xl mx-auto px-4 py-6">
-        {activeTab === 'upload' && (
-          <div className="max-w-2xl mx-auto">
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">上传 Excel 文件</h2>
-              <FileUploader onFileUpload={handleFileUpload} disabled={uploading} />
-              
-              {uploading && (
-                <div className="mt-6">
-                  <ProgressBar 
-                    progress={uploadProgress} 
-                    text="正在解析文件..."
-                  />
-                </div>
-              )}
-              
-              <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-                <h3 className="font-medium text-blue-900 mb-2">支持的模板格式</h3>
-                <ul className="text-sm text-blue-700 space-y-1">
-                  <li>• 自动识别列名（支持多种别名）</li>
-                  <li>• 支持 .xlsx 和 .xls 格式</li>
-                  <li>• 支持 1000+ 条数据导入</li>
-                  <li>• 自动记忆模板映射规则</li>
-                </ul>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'preview' && parsedRows.length > 0 && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">数据预览</h2>
-                <p className="text-sm text-gray-500">文件: {fileName} | 共 {parsedRows.length} 条</p>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={handleExport}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
-                >
-                  导出数据
-                </button>
-                <button
-                  onClick={handleSubmit}
-                  disabled={errors.length > 0 || submitProgress > 0}
-                  className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {submitProgress > 0 ? '提交中...' : '提交下单'}
-                </button>
-              </div>
-            </div>
-            
-            {submitProgress > 0 && (
-              <div className="mb-4">
-                <ProgressBar progress={submitProgress} text="正在提交..." />
-              </div>
-            )}
-            
-            {submitResult && (
-              <div className={`mb-4 p-4 rounded-lg ${
-                submitResult.failed === 0 
-                  ? 'bg-green-100 text-green-800' 
-                  : 'bg-yellow-100 text-yellow-800'
-              }`}>
-                <p className="font-medium">
-                  提交完成！成功 {submitResult.success} 条，失败 {submitResult.failed} 条
-                </p>
-              </div>
-            )}
-            
-            <ErrorList errors={errors} />
-            
-            <DataTable
-              rows={parsedRows}
-              errors={errors}
-              duplicates={duplicates}
-              onRowUpdate={handleRowUpdate}
-              onRowDelete={handleRowDelete}
-              onRowAdd={handleRowAdd}
-            />
-          </div>
-        )}
-
-        {activeTab === 'history' && (
-          <OrdersHistory />
-        )}
-      </main>
-    </div>
-  );
-}
-
-// OrdersHistory Component
-function OrdersHistory() {
-  const [orders, setOrders] = useState<{ id: string; sender_name: string; receiver_name: string; external_code: string | null; created_at: string }[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pagination, setPagination] = useState({ total: 0, pages: 1 });
-
-  const fetchOrders = useCallback(async (page = 1) => {
-    setLoading(true);
     try {
-      const url = new URL('/api/orders', window.location.origin);
-      url.searchParams.set('page', String(page));
-      url.searchParams.set('pageSize', '20');
-      if (searchTerm) {
-        url.searchParams.set('receiverName', searchTerm);
-      }
+      const res = await fetch('/api/users/import', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
       
-      const response = await fetch(url.toString());
-      const result = await response.json();
-      
-      if (result.success) {
-        setOrders(result.data);
-        setPagination(result.pagination);
+      if (data.success) {
+        const { imported, failed, errors } = data.data;
+        let message = `成功导入 ${imported} 个用户`;
+        if (failed > 0) {
+          message += `，失败 ${failed} 个`;
+        }
+        setImportResult({
+          success: true,
+          message,
+          details: errors && errors.length > 0 ? errors : undefined,
+        });
+        fetchUsers();
+      } else {
+        setImportResult({
+          success: false,
+          message: data.error || '导入失败',
+        });
       }
-    } catch (error) {
-      console.error('Fetch orders error:', error);
+    } catch (err: any) {
+      setImportResult({
+        success: false,
+        message: '导入失败: ' + err.message,
+      });
     } finally {
-      setLoading(false);
+      setImportLoading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
-  }, [searchTerm]);
+  }
 
-  useEffect(() => {
-    fetchOrders();
-  }, []);
-
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    setCurrentPage(1);
-    fetchOrders(1);
-  };
-
-  if (loading) {
-    return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <div className="flex justify-center items-center py-12">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-500"></div>
-        </div>
-      </div>
-    );
+  function formatDate(dateString: string) {
+    return new Date(dateString).toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-gray-900">历史运单</h2>
-        <form onSubmit={handleSearch} className="flex gap-2">
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="搜索收件人姓名..."
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-200"
-          />
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-semibold text-gray-800">用户列表</h2>
+        <div className="flex gap-3">
           <button
-            type="submit"
-            className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
+            onClick={() => setImportModal(true)}
+            className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors"
           >
-            搜索
+            导入用户
           </button>
-        </form>
+          <button
+            onClick={handleExport}
+            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors"
+          >
+            导出用户
+          </button>
+          <Link
+            href="/users/new"
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+          >
+            新增用户
+          </Link>
+        </div>
       </div>
-      
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b">
-                订单编号
-              </th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b">
-                外部编码
-              </th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b">
-                发件人
-              </th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b">
-                收件人
-              </th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b">
-                创建时间
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map(order => (
-              <tr key={order.id} className="border-b hover:bg-gray-50">
-                <td className="px-4 py-3 text-sm text-gray-800">{order.id}</td>
-                <td className="px-4 py-3 text-sm text-gray-600">{order.external_code || '-'}</td>
-                <td className="px-4 py-3 text-sm text-gray-800">{order.sender_name}</td>
-                <td className="px-4 py-3 text-sm text-gray-800">{order.receiver_name}</td>
-                <td className="px-4 py-3 text-sm text-gray-500">
-                  {new Date(order.created_at).toLocaleString('zh-CN')}
-                </td>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="text-center py-12 text-gray-500">加载中...</div>
+      ) : users.length === 0 ? (
+        <div className="text-center py-12 text-gray-500 bg-white rounded-lg shadow">
+          暂无用户数据
+        </div>
+      ) : (
+        <div className="bg-white shadow-md rounded-lg overflow-hidden">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">姓名</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">邮箱</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">电话</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">创建时间</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      
-      {pagination.pages > 1 && (
-        <div className="flex justify-center items-center gap-2 mt-4">
-          <button
-            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-            disabled={currentPage === 1}
-            className="px-3 py-1 text-sm border rounded hover:bg-gray-50 disabled:opacity-50"
-          >
-            上一页
-          </button>
-          <span className="text-sm text-gray-600">
-            第 {currentPage} / {pagination.pages} 页
-          </span>
-          <button
-            onClick={() => setCurrentPage(p => Math.min(pagination.pages, p + 1))}
-            disabled={currentPage === pagination.pages}
-            className="px-3 py-1 text-sm border rounded hover:bg-gray-50 disabled:opacity-50"
-          >
-            下一页
-          </button>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {users.map((user) => (
+                <tr key={user.id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.id}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{user.name}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.email}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.phone || '-'}</td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span
+                      className={`px-2 py-1 text-xs rounded-full ${
+                        user.status === 'active'
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-red-100 text-red-800'
+                      }`}
+                    >
+                      {user.status === 'active' ? '正常' : '禁用'}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(user.created_at)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    <Link
+                      href={`/users/${user.id}/edit`}
+                      className="text-blue-600 hover:text-blue-800 mr-4"
+                    >
+                      编辑
+                    </Link>
+                    <button
+                      onClick={() => setDeleteModal({ show: true, user })}
+                      className="text-red-600 hover:text-red-800"
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {deleteModal.show && deleteModal.user && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">确认删除</h3>
+            <p className="text-gray-600 mb-6">
+              确定要删除用户 <strong>{deleteModal.user.name}</strong> 吗？此操作不可撤销。
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteModal({ show: false, user: null })}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => handleDelete(deleteModal.user!)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {importModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-medium text-gray-900">导入用户</h3>
+              <button
+                onClick={() => {
+                  setImportModal(false);
+                  setImportResult(null);
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ×
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <p className="text-gray-600 text-sm">
+                请上传包含用户信息的 Excel 文件 (.xlsx, .xls) 或 CSV 文件。
+              </p>
+              
+              <button
+                onClick={handleDownloadTemplate}
+                className="text-blue-600 hover:text-blue-800 text-sm"
+              >
+                下载导入模板
+              </button>
+              
+              <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors cursor-pointer"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+                {importLoading ? (
+                  <div className="text-blue-600">导入中...</div>
+                ) : (
+                  <div>
+                    <div className="text-gray-500 mb-2">点击或拖拽文件到此处上传</div>
+                    <div className="text-gray-400 text-sm">支持 .xlsx, .xls, .csv 格式</div>
+                  </div>
+                )}
+              </div>
+
+              {importResult && (
+                <div className={`p-4 rounded-lg ${importResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                  <p className="font-medium">{importResult.message}</p>
+                  {importResult.details && importResult.details.length > 0 && (
+                    <div className="mt-2 text-sm space-y-1">
+                      <p className="font-medium">失败详情:</p>
+                      {importResult.details.map((detail, index) => (
+                        <p key={index}>{detail}</p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

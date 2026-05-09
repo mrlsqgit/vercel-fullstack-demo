@@ -1,10 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ['pg'],
+    serverComponentsExternalPackages: ['@vercel/postgres'],
   },
-  reactStrictMode: true,
-  swcMinify: true,
 };
 
 module.exports = nextConfig;
